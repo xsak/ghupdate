@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""ghupdate - check for and install updates of CLI tools from GitHub Releases.
+
+Config: ~/.config/ghupdate/config.json  (see config.example.json)
+State:  ~/.local/state/ghupdate/state.json
+
+Usage:
+  ghupdate [check|update] [tool ...]
+
+"check" (the default) only reports versions; "update" downloads the latest
+release and installs it into bin_dir, keeping the previous binary as <tool>.old.
+"""
+
+import argparse
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+from pathlib import Path
+
+DEFAULT_CONFIG = os.path.join("~", ".config", "ghupdate", "config.json")
+DEFAULT_STATE = os.path.join("~", ".local", "state", "ghupdate", "state.json")
+API = "https://api.github.com"
+UA = "ghupdate"
+MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB per-file download cap
+
+# Alternative names repos use for the machine architecture, tried when the
+# literal {arch} value doesn't work (asset name mismatch or 404 URL), since
+# repos disagree about naming (x86_64 vs amd64, aarch64 vs arm64, ...).
+ARCH_ALIASES = {
+    "x86_64": ["amd64"],
+    "i686": ["386"],
+    "aarch64": ["arm64"],
+    "armv6l": ["armv6", "arm"],
+    "armv7l": ["armv7", "arm"],
+}
+
+
+class ToolError(Exception):
+    pass
+
+
+class Http404(ToolError):
+    """A download URL returned 404; arch aliases may still be tried."""
+
+
+def http_get(url, timeout=30):
+    headers = {"User-Agent": UA, "Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        raise ToolError(f"HTTP {e.code} for {url}")
+    except urllib.error.URLError as e:
+        raise ToolError(f"cannot reach {url}: {e.reason}")
+
+
+def load_json(path, what):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        sys.exit(f"error: {what} not found: {path}")
+    except json.JSONDecodeError as e:
+        sys.exit(f"error: {what} is not valid JSON ({path}: {e})")
+
+
+def load_state(path):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        versions = data.get("versions")
+        return versions if isinstance(versions, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, AttributeError):
+        return {}
+
+
+def save_state(path, versions):
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump({"versions": versions}, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def latest_release(repo):
+    """Return (version, assets) of the repo's latest non-prerelease release."""
+    data = json.loads(http_get(f"{API}/repos/{repo}/releases/latest"))
+    tag = data.get("tag_name", "")
+    if not tag:
+        raise ToolError(f"no releases found for {repo}")
+    version = tag.removeprefix("v")
+    return version, data.get("assets") or []
+
+
+def version_tuple(v):
+    m = re.match(r"(\d+(?:\.\d+)*)", v)
+    if not m:
+        return None
+    return tuple(int(x) for x in m.group(1).split("."))
+
+
+def is_newer(latest, current):
+    a, b = version_tuple(latest), version_tuple(current)
+    if a is None or b is None:
+        return latest != current
+    n = max(len(a), len(b))
+    a += (0,) * (n - len(a))
+    b += (0,) * (n - len(b))
+    return a > b
+
+
+def installed_version(name, bin_dir, version_cmd=None):
+    """Fallback: ask the installed binary for its version.
+
+    Tries the configured version_cmd, otherwise `--version` and then the
+    `version` subcommand (helm and others don't support `--version`).
+    """
+    exe = Path(bin_dir) / name
+    if not exe.is_file():
+        return None
+    trials = [shlex.split(version_cmd)] if version_cmd else [["--version"], ["version"]]
+    for args in trials:
+        try:
+            p = subprocess.run(
+                [str(exe), *args],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        m = re.search(r"(\d+\.\d+(?:\.\d+)?)", p.stdout + " " + p.stderr)
+        if m:
+            return m.group(1)
+    return None
+
+
+def render(tmpl, version, arch):
+    return tmpl.replace("{version}", version).replace("{arch}", arch)
+
+
+def resolve_candidates(tcfg, version, arch, assets):
+    """Return (arch, url) download candidates, most likely first.
+
+    arch and its aliases are all tried, since repos disagree about
+    architecture naming. Raises ToolError if nothing can be built.
+    """
+    candidates = []
+    for a in [arch, *ARCH_ALIASES.get(arch, [])]:
+        if "url" in tcfg:
+            candidates.append((a, render(tcfg["url"], version, a)))
+            continue
+        wanted = render(tcfg["asset"], version, a)
+        for asset in assets:
+            if asset.get("name") == wanted:
+                candidates.append((a, asset["browser_download_url"]))
+                break
+    if not candidates:
+        available = [
+            a.get("name", "")
+            for a in assets
+            if a.get("name", "").endswith((".tar.gz", ".tgz", ".tar.xz", ".zip"))
+        ]
+        raise ToolError(
+            f"asset template {tcfg['asset']!r} (arch {arch}) matched no release asset; "
+            f"available: {', '.join(available[:8]) or '?'}"
+        )
+    return candidates
+
+
+def download_file(url, dest):
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
+            try:
+                length = int(r.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length > MAX_DOWNLOAD_BYTES:
+                raise ToolError(
+                    f"download too large ({length} bytes > "
+                    f"{MAX_DOWNLOAD_BYTES}): {url}"
+                )
+            copied = 0
+            while True:
+                chunk = r.read(1024 * 1024)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > MAX_DOWNLOAD_BYTES:
+                    raise ToolError(
+                        f"download exceeds {MAX_DOWNLOAD_BYTES} bytes: {url}"
+                    )
+                f.write(chunk)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise Http404(f"no such file: {url}")
+        raise ToolError(f"HTTP {e.code} downloading {url}")
+    except urllib.error.URLError as e:
+        raise ToolError(f"download failed: {e.reason}")
+    if dest.stat().st_size == 0:
+        raise ToolError(f"downloaded file is empty: {url}")
+
+
+def _safe_member_name(name, what):
+    """Reject archive member names that could escape the extraction dir."""
+    p = Path(name)
+    if p.is_absolute() or any(part == ".." for part in p.parts):
+        raise ToolError(f"unsafe path in {what}: {name!r}")
+
+
+def extract_tar(tar, dest):
+    # Path-traversal / special-file protection across all supported Pythons
+    # (filter="data" only exists on 3.12+ / backported 3.8.17+).
+    for member in tar.getmembers():
+        _safe_member_name(member.name, "archive")
+        if member.issym() or member.islnk() or member.isdev():
+            raise ToolError(f"unsafe member in archive: {member.name!r}")
+    tar.extractall(dest)
+
+
+def extract_zip(zf, dest):
+    for info in zf.infolist():
+        _safe_member_name(info.filename, "archive")
+    zf.extractall(dest)
+
+
+def locate_binary(tcfg, blob, version, arch, workdir):
+    """Return the path of the tool binary (blob itself, or inside the archive)."""
+    extract = tcfg.get("extract")
+    if not extract:
+        return blob
+    target = render(extract, version, arch)
+    dest = workdir / "extracted"
+    dest.mkdir()
+    name = blob.name
+    try:
+        if name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")):
+            with tarfile.open(blob) as tar:
+                extract_tar(tar, dest)
+        elif name.endswith(".zip"):
+            with zipfile.ZipFile(blob) as zf:
+                extract_zip(zf, dest)
+        else:
+            raise ToolError(f"unknown archive type: {name}")
+    except (tarfile.TarError, zipfile.BadZipFile) as e:
+        raise ToolError(f"failed to extract {name}: {e}")
+    src = dest / target
+    if not src.is_file():
+        listing = [
+            str(p.relative_to(dest)) for p in sorted(dest.rglob("*")) if p.is_file()
+        ][:10]
+        raise ToolError(
+            f"binary {target!r} not found in archive; "
+            f"contents: {', '.join(listing) or '?'}"
+        )
+    return src
+
+
+def do_check(name, tcfg, arch, bin_dir, state):
+    version, assets = latest_release(tcfg["repo"])
+    resolve_candidates(tcfg, version, tcfg.get("arch", arch), assets)
+    current = state.get(name) or installed_version(
+        name, bin_dir, tcfg.get("version_cmd")
+    )
+    if current is None:
+        return "not installed", f"latest {version}"
+    if is_newer(version, current):
+        return "update", f"{current} -> {version}"
+    return "up to date", current
+
+
+def do_update(name, tcfg, arch, bin_dir, state):
+    version, assets = latest_release(tcfg["repo"])
+    current = state.get(name)
+    if current is not None and not is_newer(version, current):
+        return "up to date", current
+    candidates = resolve_candidates(tcfg, version, tcfg.get("arch", arch), assets)
+    bin_path = Path(bin_dir) / name
+    bin_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="ghupdate.") as tmp:
+        workdir = Path(tmp)
+        # The arch of the first URL that actually downloads is the one the
+        # binary (and archive layout) was built for, so it is used for
+        # rendering the extract path as well.
+        for a, url in candidates:
+            rel = urllib.parse.urlparse(url).path.rsplit("/", 1)[-1] or "download"
+            blob = workdir / rel
+            try:
+                download_file(url, blob)
+            except Http404:
+                continue
+            src = locate_binary(tcfg, blob, version, a, workdir)
+            os.chmod(src, 0o755)
+            break
+        else:
+            raise ToolError(
+                "no downloadable file found (all candidates returned 404): "
+                + ", ".join(url for _, url in candidates)
+            )
+        backup = None
+        if bin_path.exists():
+            backup = bin_path.parent / (name + ".old")
+            if backup.exists():
+                backup.unlink()
+            shutil.move(str(bin_path), str(backup))
+        try:
+            shutil.move(str(src), str(bin_path))
+        except Exception:
+            if backup is not None:
+                shutil.move(str(backup), str(bin_path))
+            raise
+    state[name] = version
+    note = f" (previous kept at {backup})" if backup is not None else ""
+    verb = "installed" if current is None else "updated"
+    return verb, f"{version}{note}"
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="ghupdate",
+        description="Check for and install updates of CLI tools from GitHub Releases.",
+    )
+    ap.add_argument("action", nargs="?", default=None,
+                    help="check (default) or update")
+    ap.add_argument(
+        "tools", nargs="*", help="tool names from the config (default: all)"
+    )
+    ap.add_argument(
+        "--config", default=os.environ.get("GHUPDATE_CONFIG", DEFAULT_CONFIG)
+    )
+    ap.add_argument(
+        "--state", default=os.environ.get("GHUPDATE_STATE", DEFAULT_STATE)
+    )
+    args = ap.parse_args()
+
+    if args.action in ("check", "update"):
+        action, tools = args.action, args.tools
+    else:
+        action, tools = "check", ([args.action] if args.action else []) + args.tools
+
+    config = load_json(Path(args.config).expanduser(), "config file")
+    bin_dir = Path(config.get("bin_dir", "~/.local/bin")).expanduser()
+    arch = config.get("arch") or platform.machine()
+    tools_cfg = config.get("tools")
+    if not isinstance(tools_cfg, dict) or not tools_cfg:
+        sys.exit(f"error: config has no tools: {args.config}")
+
+    names = tools or list(tools_cfg)
+    unknown = [n for n in names if n not in tools_cfg]
+    if unknown:
+        sys.exit(
+            f"error: unknown tool(s) {', '.join(unknown)}; "
+            f"configured: {', '.join(tools_cfg)}"
+        )
+
+    state = load_state(args.state)
+    state_written = False
+    width = max(len(n) for n in names)
+    rc = 0
+    for name in names:
+        tcfg = tools_cfg[name]
+        try:
+            if not isinstance(tcfg, dict) or "repo" not in tcfg:
+                raise ToolError("missing 'repo' in config")
+            if "asset" not in tcfg and "url" not in tcfg:
+                raise ToolError("missing 'asset' or 'url' in config")
+            if action == "check":
+                status, detail = do_check(name, tcfg, arch, bin_dir, state)
+            else:
+                status, detail = do_update(name, tcfg, arch, bin_dir, state)
+                state_written = True
+        except ToolError as e:
+            status, detail, rc = "error", str(e), 1
+        print(f"{name:<{width}}  {status:<14}  {detail}")
+
+    if state_written:
+        save_state(args.state, state)
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()

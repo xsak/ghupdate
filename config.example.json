@@ -1,0 +1,25 @@
+{
+  "bin_dir": "~/.local/bin",
+  "tools": {
+    "lazygit": {
+      "repo": "jesseduffield/lazygit",
+      "asset": "lazygit_{version}_linux_{arch}.tar.gz",
+      "extract": "lazygit"
+    },
+    "lazydocker": {
+      "repo": "jesseduffield/lazydocker",
+      "asset": "lazydocker_{version}_Linux_{arch}.tar.gz",
+      "extract": "lazydocker"
+    },
+    "helm": {
+      "repo": "helm/helm",
+      "url": "https://get.helm.sh/helm-v{version}-linux-{arch}.tar.gz",
+      "extract": "linux-{arch}/helm"
+    },
+    "lfk": {
+      "repo": "janosmiko/lfk",
+      "asset": "lfk_{version}_linux_{arch}.tar.gz",
+      "extract": "lfk"
+    }
+  }
+}
