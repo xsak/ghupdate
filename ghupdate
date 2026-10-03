@@ -278,9 +278,13 @@ def locate_binary(tcfg, blob, version, arch, workdir):
 def do_check(name, tcfg, arch, bin_dir, state):
     version, assets = latest_release(tcfg["repo"])
     resolve_candidates(tcfg, version, tcfg.get("arch", arch), assets)
-    current = state.get(name) or installed_version(
-        name, bin_dir, tcfg.get("version_cmd")
-    )
+    # The binary's presence is the source of truth: a stale state entry must
+    # not make a deleted binary look installed.
+    current = None
+    if (Path(bin_dir) / name).is_file():
+        current = state.get(name) or installed_version(
+            name, bin_dir, tcfg.get("version_cmd")
+        )
     if current is None:
         return "not installed", f"latest {version}"
     if is_newer(version, current):
@@ -290,11 +294,13 @@ def do_check(name, tcfg, arch, bin_dir, state):
 
 def do_update(name, tcfg, arch, bin_dir, state):
     version, assets = latest_release(tcfg["repo"])
-    current = state.get(name)
+    bin_path = Path(bin_dir) / name
+    # A recorded version is only meaningful while the binary is actually
+    # installed; a deleted binary must be reinstalled even if state matches.
+    current = state.get(name) if bin_path.is_file() else None
     if current is not None and not is_newer(version, current):
         return "up to date", current
     candidates = resolve_candidates(tcfg, version, tcfg.get("arch", arch), assets)
-    bin_path = Path(bin_dir) / name
     bin_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="ghupdate.") as tmp:
         workdir = Path(tmp)
