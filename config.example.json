@@ -25,6 +25,11 @@
       "repo": "janosmiko/lfk",
       "asset": "lfk_{version}_linux_{arch}.tar.gz",
       "extract": "lfk"
+    },
+    "sofka": {
+      "repo": "nklmilojevic/sofka",
+      "asset": "sofka-v{version}-{arch}-unknown-linux-gnu.tar.gz",
+      "extract": "sofka"
     }
   }
 }
