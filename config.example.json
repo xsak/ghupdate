@@ -11,6 +11,11 @@
       "asset": "lazydocker_{version}_Linux_{arch}.tar.gz",
       "extract": "lazydocker"
     },
+    "lazypodman": {
+      "repo": "m7medVision/lazypodman",
+      "asset": "lazypodman_{version}_Linux_{arch}.tar.gz",
+      "extract": "lazypodman"
+    },
     "helm": {
       "repo": "helm/helm",
       "url": "https://get.helm.sh/helm-v{version}-linux-{arch}.tar.gz",
