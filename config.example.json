@@ -54,6 +54,11 @@
       "repo": "amir20/dtop",
       "asset": "dtop-{arch}-unknown-linux-gnu.tar.gz",
       "extract": "dtop-{arch}-unknown-linux-gnu/dtop"
+    },
+    "spf": {
+      "repo": "yorukot/superfile",
+      "asset": "superfile-linux-v{version}-{arch}.tar.gz",
+      "extract": "dist/superfile-linux-v{version}-{arch}/spf"
     }
   }
 }
