@@ -30,6 +30,30 @@
       "repo": "nklmilojevic/sofka",
       "asset": "sofka-v{version}-{arch}-unknown-linux-gnu.tar.gz",
       "extract": "sofka"
+    },
+    "fzf": {
+      "repo": "junegunn/fzf",
+      "asset": "fzf-{version}-linux_{arch}.tar.gz",
+      "extract": "fzf"
+    },
+    "fd": {
+      "repo": "sharkdp/fd",
+      "asset": "fd-v{version}-{arch}-unknown-linux-gnu.tar.gz",
+      "extract": "fd-v{version}-{arch}-unknown-linux-gnu/fd"
+    },
+    "rg": {
+      "repo": "BurntSushi/ripgrep",
+      "asset": "ripgrep-{version}-{arch}-unknown-linux-musl.tar.gz",
+      "extract": "ripgrep-{version}-{arch}-unknown-linux-musl/rg"
+    },
+    "yq": {
+      "repo": "mikefarah/yq",
+      "asset": "yq_linux_{arch}"
+    },
+    "dtop": {
+      "repo": "amir20/dtop",
+      "asset": "dtop-{arch}-unknown-linux-gnu.tar.gz",
+      "extract": "dtop-{arch}-unknown-linux-gnu/dtop"
     }
   }
 }
