@@ -59,6 +59,10 @@
       "repo": "yorukot/superfile",
       "asset": "superfile-linux-v{version}-{arch}.tar.gz",
       "extract": "dist/superfile-linux-v{version}-{arch}/spf"
+    },
+    "ttt": {
+      "repo": "eugenioenko/ttt",
+      "asset": "ttt-linux-{arch}"
     }
   }
 }
