@@ -63,3 +63,31 @@ for tool in tools:
 
 print("all ok")
 PY
+
+echo "=== update again with the state file removed (regression: no reinstalls)"
+# Binaries are already the latest but have no state entries; update must
+# probe them and report "up to date" instead of re-downloading everything.
+rm "$tmp/state.json"
+out="$(python3 ghupdate --config "$tmp/config.json" --state "$tmp/state.json" update $tools)"
+printf '%s\n' "$out"
+if printf '%s\n' "$out" | grep -qv 'up to date'; then
+    echo "FAIL: up-to-date tools were reinstalled without a state file" >&2
+    exit 1
+fi
+if ls "$tmp/bin"/*.old >/dev/null 2>&1; then
+    echo "FAIL: .old backups found, so binaries were replaced" >&2
+    exit 1
+fi
+
+echo "=== state was backfilled from the probed versions"
+python3 - "$tmp/state.json" "$tools" <<'PY'
+import json, sys
+
+state = json.load(open(sys.argv[1]))["versions"]
+missing = [t for t in sys.argv[2].split() if not state.get(t)]
+if missing:
+    sys.exit(f"FAIL: state not backfilled for: {', '.join(missing)}")
+print("  all tools recorded")
+PY
+
+echo "all ok"

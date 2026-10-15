@@ -9,6 +9,9 @@ Usage:
 
 "check" (the default) only reports versions; "update" downloads the latest
 release and installs it into bin_dir, keeping the previous binary as <tool>.old.
+Tools whose installed binary is already current are reported "up to date"
+without re-downloading, even when the state file has no entry for them (the
+binary's own version output is used and recorded back into the state).
 """
 
 import argparse
@@ -153,6 +156,20 @@ def installed_version(name, bin_dir, version_cmd=None):
     return None
 
 
+def resolve_current(name, tcfg, bin_dir, state):
+    """Return the version of the installed binary, or None if not installed.
+
+    The binary's presence is the source of truth: a stale state entry must
+    not make a deleted binary look installed. With no state entry (a tool
+    installed outside ghupdate, or state lost), probe the binary itself.
+    """
+    if not (Path(bin_dir) / name).is_file():
+        return None
+    return state.get(name) or installed_version(
+        name, bin_dir, tcfg.get("version_cmd")
+    )
+
+
 def render(tmpl, version, arch):
     return tmpl.replace("{version}", version).replace("{arch}", arch)
 
@@ -278,13 +295,7 @@ def locate_binary(tcfg, blob, version, arch, workdir):
 def do_check(name, tcfg, arch, bin_dir, state):
     version, assets = latest_release(tcfg["repo"])
     resolve_candidates(tcfg, version, tcfg.get("arch", arch), assets)
-    # The binary's presence is the source of truth: a stale state entry must
-    # not make a deleted binary look installed.
-    current = None
-    if (Path(bin_dir) / name).is_file():
-        current = state.get(name) or installed_version(
-            name, bin_dir, tcfg.get("version_cmd")
-        )
+    current = resolve_current(name, tcfg, bin_dir, state)
     if current is None:
         return "not installed", f"latest {version}"
     if is_newer(version, current):
@@ -295,10 +306,12 @@ def do_check(name, tcfg, arch, bin_dir, state):
 def do_update(name, tcfg, arch, bin_dir, state):
     version, assets = latest_release(tcfg["repo"])
     bin_path = Path(bin_dir) / name
-    # A recorded version is only meaningful while the binary is actually
-    # installed; a deleted binary must be reinstalled even if state matches.
-    current = state.get(name) if bin_path.is_file() else None
+    existed = bin_path.is_file()
+    current = resolve_current(name, tcfg, bin_dir, state)
     if current is not None and not is_newer(version, current):
+        # The installed binary is already the latest; record what was probed
+        # so the next run does not have to ask the binary again.
+        state[name] = current
         return "up to date", current
     candidates = resolve_candidates(tcfg, version, tcfg.get("arch", arch), assets)
     bin_path.parent.mkdir(parents=True, exist_ok=True)
@@ -336,7 +349,7 @@ def do_update(name, tcfg, arch, bin_dir, state):
             raise
     state[name] = version
     note = f" (previous kept at {backup})" if backup is not None else ""
-    verb = "installed" if current is None else "updated"
+    verb = "updated" if existed else "installed"
     return verb, f"{version}{note}"
 
 

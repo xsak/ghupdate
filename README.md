@@ -114,7 +114,10 @@ Installed versions are recorded in the state file
 `GHUPDATE_STATE`) after each successful update. If there's no state entry
 yet, `ghupdate` probes the installed binary for its version: it tries
 the per-tool `version_cmd` (default: `--version`, then the `version`
-subcommand, since e.g. helm doesn't support `--version`).
+subcommand, since e.g. helm doesn't support `--version`). This applies to
+`update` as well as `check`: a binary that is already current is reported
+"up to date" and never re-downloaded, and its probed version is recorded
+back into the state file.
 
 ## Notes
 
