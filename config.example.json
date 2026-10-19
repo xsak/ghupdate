@@ -63,6 +63,11 @@
     "ttt": {
       "repo": "eugenioenko/ttt",
       "asset": "ttt-linux-{arch}"
+    },
+    "k9s": {
+      "repo": "derailed/k9s",
+      "asset": "k9s_Linux_{arch}.tar.gz",
+      "extract": "k9s"
     }
   }
 }
